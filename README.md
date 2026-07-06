@@ -18,7 +18,6 @@
 | 🎞️ 动画视频 | 数据/产品/内容一键生成动画视频 | [飞书文档](https://my.feishu.cn/wiki/UaD9wYgcRi5ouhkD0HXcYeiwnjb) |
 | 🖼️ AI绘图 | 文生图、图生图 | [飞书文档](https://my.feishu.cn/wiki/NNwxw1FJ1io1rQkOlIBcLLFdnS6) |
 | 🎭 换脸 | 高精度面部替换 | [使用帮助](https://my.feishu.cn/docx/GJQmddlq9oBoMHxARNfctQF4nTb) |
-| 🎼 AI音乐 | AI作曲与编曲 | [飞书文档](https://my.feishu.cn/wiki/EXEawd4ACi2mRXkMmi6c7q1Fn1b) |
 | 💬 数字人交互 | 实时语音对话数字人 | [飞书文档](https://my.feishu.cn/wiki/B9J8w6eqTiZK3SkbavmcHcQDnOh) |
 
 ## 离线部署产品
