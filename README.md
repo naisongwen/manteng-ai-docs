@@ -20,6 +20,10 @@
 | 🎭 换脸 | 高精度面部替换 | [使用帮助](https://my.feishu.cn/docx/GJQmddlq9oBoMHxARNfctQF4nTb) |
 | 💬 数字人交互 | 实时语音对话数字人 | [飞书文档](https://my.feishu.cn/wiki/B9J8w6eqTiZK3SkbavmcHcQDnOh) |
 
+## 蔓藤数字人开放平台
+
+[开放平台入口](https://my.feishu.cn/docx/GJQmddlq9oBoMHxARNfctQF4nTb)
+
 ## 离线部署产品
 
 | 产品 | 简介 | 帮助文档 |
