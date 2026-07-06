@@ -24,8 +24,8 @@
 
 | 产品 | 简介 | 帮助文档 |
 |------|------|----------|
-| 🤖 数字人直播系统 | 本地部署，24h无人直播 | [飞书文档]() |
-| 🏭 企业私有化AI中台 | 企业内部大模型+数字人 | [飞书文档]() |
+| 🤖 数字人直播系统 | 本地部署，24h无人直播 | [飞书文档](https://my.feishu.cn/docx/JQhjdoRkvoswxDx6RGNcf6lGnIc) |
+| 🏭 企业私有化AI中台 | 企业内部大模型+数字人 | [飞书文档](https://my.feishu.cn/docx/JQhjdoRkvoswxDx6RGNcf6lGnIc) |
 
 ---
 
