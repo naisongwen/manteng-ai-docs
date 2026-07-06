@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小程序 WebView 语音通话音质问题排查复盘</title>
+  <style>
+    body { margin: 0; background: #f6f7f9; color: #1f2328; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 48px 28px 72px; background: #fff; min-height: 100vh; box-sizing: border-box; }
+    h1 { margin: 0 0 28px; font-size: 32px; line-height: 1.25; }
+    h2 { margin: 40px 0 14px; padding-top: 8px; font-size: 24px; border-top: 1px solid #e8eaee; }
+    h3 { margin: 28px 0 10px; font-size: 19px; }
+    p { margin: 12px 0; }
+    ul, ol { margin: 10px 0 18px; padding-left: 24px; }
+    li { margin: 6px 0; }
+    code { padding: 2px 5px; border-radius: 4px; background: #f0f2f5; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+    pre { overflow: auto; padding: 16px; border-radius: 8px; background: #0f172a; color: #e5e7eb; line-height: 1.55; }
+    pre code { padding: 0; background: transparent; color: inherit; }
+    blockquote { margin: 16px 0; padding: 12px 16px; border-left: 4px solid #3861fb; background: #f5f7ff; color: #2d3748; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>小程序 WebView 语音通话音质问题排查复盘</h1>
+    <h2>摘要</h2>
+    <p>这次问题的表象是：同一套 voice-chat H5 页面，直接在浏览器访问时 agent 语音清晰稳定；通过微信小程序 <code>web-view</code> 打开时，部分 Android 手机会听到滋滋啦啦、断断续续的声音，iOS 小程序里甚至出现完全卡住、无声的情况。</p>
+    <p>最终确认，问题不在后端接口、agent 生成音频或 RTC 房间本身，而在微信小程序 WebView 环境下的 RTC 音频播放链路。部分手机微信内核对 SDK 默认的 WebAudio in-track 处理路径兼容不好，叠加 WebView/系统层音频处理后，会出现远端 agent 播放失真、卡顿或无声。</p>
+    <p>真正生效的修复是：在 miniapp 入口下绕开 WebAudio in-track 路径，并恢复 miniapp 专用的 RTC 采集、订阅、播放和优先级配置。</p>
+    <h2>背景架构</h2>
+    <p>当前语音通话链路由三部分组成：</p>
+    <ol>
+    <li>小程序页面：<code>packageChat/h5-chat/h5-chat</code> 通过 <code>web-view</code> 加载线上 H5。</li>
+    <li>H5 页面：<code>src/views/voice-chat/index.vue</code> 负责登录态同步、RTC 初始化、进房、麦克风采集、订阅 agent 远端流和播放。</li>
+    <li>后端接口：<code>aigc-backend</code> 提供 voice-chat 会话创建、启动和停止能力，agent 进入同一个 RTC 房间后发布语音流。</li>
+    </ol>
+    <p>由于直接访问 H5 页面音质正常，而小程序内访问异常，问题范围一开始就可以缩小到“小程序 WebView 环境 + H5 RTC SDK 运行方式”的差异上，而不是后端合成音频质量。</p>
+    <h2>现象</h2>
+    <p>问题集中出现在远端 agent 声音：</p>
+    <ul>
+    <li>直接打开 <code>voice-chat</code> H5 页面，agent 音质正常。</li>
+    <li>小程序 <code>web-view</code> 打开同一页面，部分 Android 机型出现滋滋啦啦、爆音、断续。</li>
+    <li>某些微信/手机组合播放正常，某些组合异常，说明不是稳定的服务端音频数据损坏。</li>
+    <li>iOS 小程序出现过播放完全卡住、无声音。</li>
+    <li>用户本地麦克风采集不是主要问题，主要问题是远端 agent 播放链路。</li>
+    </ul>
+    <p>这个现象非常关键：如果后端推流或 agent 音频源本身坏了，直接访问 H5 也应该复现；如果所有手机都坏，可能是通用前端逻辑错误；但问题只在部分小程序 WebView 里出现，说明兼容性问题概率更高。</p>
+    <h2>排查过程</h2>
+    <h3>1. 先排除后端和 agent 音频源</h3>
+    <p>我们对比了两种入口：</p>
+    <ul>
+    <li>浏览器直接访问 H5。</li>
+    <li>小程序 <code>web-view</code> 访问同一个 H5。</li>
+    </ul>
+    <p>两者使用同一套后端接口、同一个 RTC SDK、同一个 agent 流。直接 H5 正常，小程序异常，因此后端接口返回、agent 生成音频、RTC 房间创建这些链路不是根因。</p>
+    <h3>2. 尝试统一音频档位</h3>
+    <p>最早怀疑是小程序 WebView 中 SDK 默认协商到了较低质量的音频档位，于是尝试显式设置：</p>
+    <pre><code class="language-ts">await rtcEngine.setAudioProfile(getRtcConstant('AudioProfileType', 'standard'));</code></pre>
+    <p>这个修改有必要，但不是根因。后续验证发现，“只设置 standard”无法彻底解决小程序内的滋滋啦啦和卡顿问题。</p>
+    <h3>3. 尝试调整采集参数</h3>
+    <p>接着我们尝试过不同的采集参数组合，包括采样率、降噪、自动增益、码率等。过程中发现 AGC 容易和 WebView/系统层音频处理叠加，造成音量被反复拉伸，听感上接近破音或断续。</p>
+    <p>最终保留下来的 miniapp 采集配置是：</p>
+    <pre><code class="language-ts">await rtcEngine.setAudioCaptureConfig({
+  sampleRate: 48000,
+  channelCount: 1,
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: false
+});</code></pre>
+    <p>这里的重点不是“48kHz 单独解决问题”，而是 miniapp 环境下要明确接管 RTC 音频配置，避免 SDK 默认值、WebView 默认处理和系统音频策略互相叠加。</p>
+    <h3>4. 关注设备差异</h3>
+    <p>问题不是所有手机都复现。有些 Android 微信上播放正常，有些 Android 有明显杂音；iOS 小程序又出现无声。这说明问题不太可能是应用层某个简单参数错误，而是 WebView 内核、系统音频设备、微信版本和 RTC SDK 音频输出链路之间的兼容性问题。</p>
+    <p>这个阶段我们把排查重点从“后端音频质量”转向“WebView 播放路径”。</p>
+    <h3>5. 找到关键开关：SKIP_WEB_AUDIO_IN_TRACK</h3>
+    <p>最终真正改变结果的是：</p>
+    <pre><code class="language-ts">sdk.setParameter('SKIP_WEB_AUDIO_IN_TRACK', true);</code></pre>
+    <p>这个参数的作用是让 RTC SDK 跳过 WebAudio in-track 处理路径。WebAudio 本身是浏览器提供的音频处理 API，可以用于混音、增益、滤波、分析和调度播放。但在微信小程序 WebView 中，WebAudio 相关链路在不同内核和设备上的行为并不完全一致。</p>
+    <p>当远端 agent 音频走到 WebAudio in-track 路径后，部分设备会出现播放调度不稳、额外处理叠加、音频块衔接异常等问题，表现为滋滋啦啦、断断续续或无声。跳过这条路径后，远端播放稳定性恢复。</p>
+    <h3>6. 清理代码导致回归</h3>
+    <p>问题修好后，我们曾经尝试清理之前的试探性代码。但清理时把真正起作用的 miniapp 专用逻辑也删掉了，包括：</p>
+    <ul>
+    <li>miniapp 下的音频采集配置。</li>
+    <li>远端播放音量设置。</li>
+    <li>手动订阅和播放远端 agent 音频。</li>
+    <li>远端用户优先级。</li>
+    <li><code>SKIP_WEB_AUDIO_IN_TRACK</code>。</li>
+    </ul>
+    <p>清理后 Android 音质问题重新出现。把这些逻辑完整恢复后，iOS 和 Android 又恢复正常。这次回归反向证明：问题根因确实在 miniapp WebView 的 RTC 音频播放链路，而不是后端音频源。</p>
+    <h2>最终修复</h2>
+    <p>最终修复集中在 <code>src/views/voice-chat/index.vue</code>。</p>
+    <h3>1. miniapp 下跳过 WebAudio in-track</h3>
+    <pre><code class="language-ts">await sdk.enableDevices({ audio: true, video: false });
+if (isMiniappSource.value) {
+  sdk.setParameter('SKIP_WEB_AUDIO_IN_TRACK', true);
+}</code></pre>
+    <p>这是本次修复的关键。它让小程序 WebView 避开兼容性不稳定的 WebAudio in-track 路径。</p>
+    <h3>2. miniapp 下恢复独立 RTC 音频调优</h3>
+    <pre><code class="language-ts">async function applyMiniappRtcAudioTuning(rtcEngine: any) {
+  if (!isMiniappSource.value || !rtcEngine) {
+    return;
+  }
+
+  const standardProfile = getRtcAudioProfile('standard');
+  if (standardProfile !== undefined) {
+    await rtcEngine.setAudioProfile(standardProfile);
+  }
+
+  await rtcEngine.setAudioCaptureConfig({
+    sampleRate: 48000,
+    channelCount: 1,
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: false
+  });
+}</code></pre>
+    <p>这段逻辑不能被当成无用的试验代码删除。它和 <code>SKIP_WEB_AUDIO_IN_TRACK</code> 一起构成 miniapp WebView 的稳定音频链路。</p>
+    <h3>3. 设置 miniapp 采集和播放音量</h3>
+    <pre><code class="language-ts">const miniappLocalCaptureVolume = 75;
+const miniappRemotePlaybackVolume = 65;</code></pre>
+    <p>麦克风开启后设置本地采集音量：</p>
+    <pre><code class="language-ts">if (isMiniappSource.value) {
+  engine.value.setCaptureVolume(
+    getRtcConstant('StreamIndex', MAIN_STREAM_INDEX),
+    miniappLocalCaptureVolume
+  );
+}</code></pre>
+    <p>订阅远端 agent 后设置播放音量：</p>
+    <pre><code class="language-ts">if (isMiniappSource.value) {
+  engine.value.setPlaybackVolume(
+    event.userId,
+    getRtcConstant('StreamIndex', MAIN_STREAM_INDEX),
+    miniappRemotePlaybackVolume
+  );
+}</code></pre>
+    <p>音量不是根因，但它避免 WebView/系统层过度放大导致破音，也让不同设备上的听感更一致。</p>
+    <h3>4. 手动订阅远端音频并设置优先级</h3>
+    <pre><code class="language-ts">if (isMiniappSource.value &amp;&amp; typeof engine.value.setRemoteUserPriority === 'function') {
+  engine.value.setRemoteUserPriority(
+    event.userId,
+    getRtcConstant('RemoteUserPriority', 'HIGH')
+  );
+}
+
+await engine.value.subscribeStream(event.userId, audioMediaType);</code></pre>
+    <p>小程序 WebView 中不能完全依赖自动订阅和默认播放行为。显式订阅远端 agent 音频、设置高优先级，可以降低弱网或设备调度差异带来的播放抖动。</p>
+    <h3>5. 保证 publish/unpublish 的异步顺序</h3>
+    <pre><code class="language-ts">await engine.value.publishStream(getRtcConstant('MediaType', 'AUDIO'));
+await engine.value.unpublishStream(getRtcConstant('MediaType', 'AUDIO'));</code></pre>
+    <p>这不是音质根因，但能减少进出房、开关麦时的状态竞争，避免下一次会话继承异常状态。</p>
+    <h2>根因结论</h2>
+    <p>真正的问题原因是：</p>
+    <blockquote>微信小程序 WebView 环境下，RTC SDK 默认的 WebAudio in-track 音频处理路径在部分 iOS/Android 微信内核上兼容性不好，导致远端 agent 音频播放出现失真、断续或卡死。清理代码时删除 miniapp 专用音频链路后，问题重新出现；完整恢复后问题消失。</blockquote>
+    <p>这也解释了几个关键现象：</p>
+    <ul>
+    <li>直接访问 H5 正常：普通浏览器的音频链路没有触发同样的 WebView 兼容问题。</li>
+    <li>只有部分手机异常：微信内核、系统音频栈和设备硬件差异影响 WebAudio 播放稳定性。</li>
+    <li>后端无须改动：同一个 agent 流在直接 H5 中正常播放。</li>
+    <li><code>standard</code> 单独无效：音频档位只能改善编码质量，无法绕开 WebAudio 兼容问题。</li>
+    <li>清理后复现：被删掉的不是无效试验代码，而是 miniapp 环境的必要兼容层。</li>
+    </ul>
+    <h2>经验教训</h2>
+    <ol>
+    <li>WebView 问题不要只用桌面浏览器验证。</li>
+    </ol>
+    <p>语音、视频、摄像头、播放设备这类能力必须覆盖微信小程序 iOS、Android 和不同微信版本。</p>
+    <ol>
+    <li>试探性代码在清理前要先分类。</li>
+    </ol>
+    <p>对音频链路来说，“看起来像 workaround”的代码可能正是兼容性修复。删除前必须有设备回归结果。</p>
+    <ol>
+    <li>对 miniapp WebView 保留独立音频策略。</li>
+    </ol>
+    <p>直接 H5 和小程序 WebView 不能完全视为同一个运行环境。小程序需要独立的音频参数、播放路径和订阅策略。</p>
+    <ol>
+    <li>根因判断要结合反向验证。</li>
+    </ol>
+    <p>本次清理后问题复现、恢复后问题消失，是确认根因的重要证据。</p>
+    <h2>后续建议</h2>
+    <ol>
+    <li>增加语音诊断日志。</li>
+    </ol>
+    <p>记录入口来源、设备平台、微信版本、是否启用 <code>SKIP_WEB_AUDIO_IN_TRACK</code>、音频 profile、采集配置、订阅状态和播放失败事件。</p>
+    <ol>
+    <li>建立设备回归矩阵。</li>
+    </ol>
+    <p>至少覆盖 iPhone + 微信、主流 Android + 微信、直接 H5 浏览器三类入口。</p>
+    <ol>
+    <li>给 miniapp 音频兼容代码加注释。</li>
+    </ol>
+    <p>说明这些逻辑是已验证的兼容修复，避免后续优化时再次被误删。</p>
+    <ol>
+    <li>保持后端和前端问题边界清晰。</li>
+    </ol>
+    <p>当直接 H5 正常、小程序异常时，优先检查 WebView、SDK 参数、浏览器能力和设备策略。</p>
+    <h2>最终状态</h2>
+    <p>当前修复已经恢复并验证正常：</p>
+    <ul>
+    <li>iOS 小程序播放恢复。</li>
+    <li>Android 小程序播放恢复。</li>
+    <li>直接 H5 页面继续保持正常。</li>
+    <li>后端 voice-chat 接口无需修改。</li>
+    </ul>
+    <p>这次问题的本质不是“音频质量参数调大或调小”，而是“小程序 WebView 中要避开不稳定的 WebAudio 处理路径，并显式接管 RTC 远端播放链路”。</p>
+  </main>
+</body>
+</html>
